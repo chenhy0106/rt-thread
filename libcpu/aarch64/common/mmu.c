@@ -237,6 +237,73 @@ void rt_hw_mmu_unmap(rt_aspace_t aspace, void *v_addr, size_t size)
     }
 }
 
+static rt_uint8_t ASID_BITS = 0;
+static rt_uint32_t next_asid;
+static rt_uint64_t global_asid_generation;
+#define ASID_MASK ((1 << ASID_BITS) - 1)
+#define ASID_FIRST_GENERATION (1 << ASID_BITS)
+#define MAX_ASID ASID_FIRST_GENERATION
+
+static rt_uint8_t flush_tlb_mask[RT_CPUS_NR];
+static rt_spinlock_t asid_lock;
+
+void _asid_init(void)
+{
+    rt_hw_spin_lock_init(&asid_lock.lock);
+
+    rt_uint64_t ID_AA64MMFR0_EL1_value;
+    __asm__ volatile("MRS %0, ID_AA64MMFR0_EL1" : "=r"(ID_AA64MMFR0_EL1_value));
+    rt_uint8_t ASIDBits = (ID_AA64MMFR0_EL1_value >> 4) & 0xf;
+    if (ASIDBits == 0x2)
+    {
+        ASID_BITS = 16;
+    }
+    else
+    {
+        ASID_BITS = 8;
+    }
+
+    global_asid_generation = ASID_FIRST_GENERATION;
+    next_asid = 1;
+}
+
+void asid_check_switch(rt_aspace_t aspace)
+{
+    unsigned long cur_cpu = rt_hw_cpu_id();
+    rt_hw_spin_lock(&asid_lock.lock);
+
+    if ((aspace->asid ^ global_asid_generation) >> ASID_BITS) // not same generation
+    {
+        if (next_asid != MAX_ASID)
+        {
+            aspace->asid = global_asid_generation | next_asid;
+            next_asid++;
+        }
+        else
+        {
+            // scroll to next generation
+            global_asid_generation += ASID_FIRST_GENERATION;
+            next_asid = 1;
+            for (unsigned cpu = 0; cpu < RT_CPUS_NR; cpu++)
+            {
+                flush_tlb_mask[cpu] = 1;
+            }
+
+            aspace->asid = global_asid_generation | next_asid;
+            next_asid++;
+        }
+    }
+
+    if (flush_tlb_mask[cur_cpu]) 
+    {
+        rt_hw_tlb_invalidate_all_local();
+        flush_tlb_mask[cur_cpu] = 0;
+    }
+    rt_hw_spin_unlock(&asid_lock.lock);    
+
+    return aspace->asid & ASID_MASK;
+}
+
 void rt_hw_aspace_switch(rt_aspace_t aspace)
 {
     if (aspace != &rt_kernel_space)
@@ -245,15 +312,20 @@ void rt_hw_aspace_switch(rt_aspace_t aspace)
         pgtbl = _rt_kmem_v2p(pgtbl);
         uintptr_t tcr;
 
-        __asm__ volatile("msr ttbr0_el1, %0" ::"r"(pgtbl) : "memory");
+#ifdef ARCH_HAS_ASID
+        rt_uint64_t asid = asid_check_switch(aspace);
+#else
+        rt_uint64_t asid = 0;
+#endif
+        uint64_t ttbr0_el1 = (uint64_t)pgtbl | (asid << 48);
+
+        __asm__ volatile("msr ttbr0_el1, %0" ::"r"(ttbr0_el1) : "memory");
 
         __asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
         tcr &= ~(1ul << 7);
         __asm__ volatile("msr tcr_el1, %0\n"
                          "isb" ::"r"(tcr)
                          : "memory");
-
-        rt_hw_tlb_invalidate_all_local();
     }
 }
 
@@ -316,6 +388,8 @@ void rt_hw_mmu_setup(rt_aspace_t aspace, struct mem_desc *mdesc, int desc_nr)
 
     rt_hw_mmu_ktbl_set((unsigned long)rt_kernel_space.page_table);
     rt_page_cleanup();
+
+    _asid_init();
 }
 
 

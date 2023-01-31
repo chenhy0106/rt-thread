@@ -33,23 +33,28 @@ struct mem_desc
 #define MMU_SHARED_SHIFT 8
 #define MMU_AP_SHIFT     6
 #define MMU_MA_SHIFT     2
+#define MMU_NG_SHIFT     11
 
 #define MMU_AP_KAUN      0UL /* kernel r/w, user none */
 #define MMU_AP_KAUA      1UL /* kernel r/w, user r/w */
 #define MMU_AP_KRUN      2UL /* kernel r, user none */
 #define MMU_AP_KRUR      3UL /* kernel r, user r */
 
-#define MMU_MAP_CUSTOM(ap, mtype)                                              \
+#define MMU_NOGLOBAL     1UL
+#define MMU_GLOBAL       0UL    
+
+#define MMU_MAP_CUSTOM(ap, mtype, nG)                                          \
     ((0x1UL << MMU_AF_SHIFT) | (0x2UL << MMU_SHARED_SHIFT) |                   \
-     ((ap) << MMU_AP_SHIFT) | ((mtype) << MMU_MA_SHIFT))
-#define MMU_MAP_K_RO     MMU_MAP_CUSTOM(MMU_AP_KRUN, NORMAL_MEM)
-#define MMU_MAP_K_RWCB   MMU_MAP_CUSTOM(MMU_AP_KAUN, NORMAL_MEM)
-#define MMU_MAP_K_RW     MMU_MAP_CUSTOM(MMU_AP_KAUN, NORMAL_NOCACHE_MEM)
-#define MMU_MAP_K_DEVICE MMU_MAP_CUSTOM(MMU_AP_KAUN, DEVICE_MEM)
-#define MMU_MAP_U_RO     MMU_MAP_CUSTOM(MMU_AP_KRUR, NORMAL_NOCACHE_MEM)
-#define MMU_MAP_U_RWCB   MMU_MAP_CUSTOM(MMU_AP_KAUA, NORMAL_MEM)
-#define MMU_MAP_U_RW     MMU_MAP_CUSTOM(MMU_AP_KAUA, NORMAL_NOCACHE_MEM)
-#define MMU_MAP_U_DEVICE MMU_MAP_CUSTOM(MMU_AP_KAUA, DEVICE_MEM)
+     ((ap) << MMU_AP_SHIFT) | ((mtype) << MMU_MA_SHIFT) |                      \
+     ((nG) << MMU_NG_SHIFT))
+#define MMU_MAP_K_RO     MMU_MAP_CUSTOM(MMU_AP_KRUN, NORMAL_MEM, MMU_NOGLOBAL)
+#define MMU_MAP_K_RWCB   MMU_MAP_CUSTOM(MMU_AP_KAUN, NORMAL_MEM, MMU_NOGLOBAL)
+#define MMU_MAP_K_RW     MMU_MAP_CUSTOM(MMU_AP_KAUN, NORMAL_NOCACHE_MEM, MMU_NOGLOBAL)
+#define MMU_MAP_K_DEVICE MMU_MAP_CUSTOM(MMU_AP_KAUN, DEVICE_MEM, MMU_NOGLOBAL)
+#define MMU_MAP_U_RO     MMU_MAP_CUSTOM(MMU_AP_KRUR, NORMAL_NOCACHE_MEM, MMU_GLOBAL)
+#define MMU_MAP_U_RWCB   MMU_MAP_CUSTOM(MMU_AP_KAUA, NORMAL_MEM, MMU_GLOBAL)
+#define MMU_MAP_U_RW     MMU_MAP_CUSTOM(MMU_AP_KAUA, NORMAL_NOCACHE_MEM, MMU_GLOBAL)
+#define MMU_MAP_U_DEVICE MMU_MAP_CUSTOM(MMU_AP_KAUA, DEVICE_MEM, MMU_GLOBAL)
 
 #define ARCH_SECTION_SHIFT  21
 #define ARCH_SECTION_SIZE   (1 << ARCH_SECTION_SHIFT)
