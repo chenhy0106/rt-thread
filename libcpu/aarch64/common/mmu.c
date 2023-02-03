@@ -244,12 +244,21 @@ static rt_uint64_t global_asid_generation;
 #define ASID_FIRST_GENERATION (1 << ASID_BITS)
 #define MAX_ASID ASID_FIRST_GENERATION
 
+#ifndef RT_CPUS_NR
+#define RT_CPUS_NR 1
+#endif
+
 static rt_uint8_t flush_tlb_mask[RT_CPUS_NR];
-static rt_spinlock_t asid_lock;
+
+#ifdef RT_USING_SMP
+static rt_hw_spinlock_t asid_lock;
+#endif
 
 void _asid_init(void)
 {
-    rt_hw_spin_lock_init(&asid_lock.lock);
+#ifdef RT_USING_SMP
+    rt_hw_spin_lock_init(&asid_lock);
+#endif
 
     rt_uint64_t ID_AA64MMFR0_EL1_value;
     __asm__ volatile("MRS %0, ID_AA64MMFR0_EL1" : "=r"(ID_AA64MMFR0_EL1_value));
@@ -267,10 +276,14 @@ void _asid_init(void)
     next_asid = 1;
 }
 
-void asid_check_switch(rt_aspace_t aspace)
+rt_uint64_t asid_check_switch(rt_aspace_t aspace)
 {
+#ifdef RT_USING_SMP
     unsigned long cur_cpu = rt_hw_cpu_id();
-    rt_hw_spin_lock(&asid_lock.lock);
+    rt_hw_spin_lock(&asid_lock);
+#else
+    unsigned long cur_cpu = 1;
+#endif
 
     if ((aspace->asid ^ global_asid_generation) >> ASID_BITS) // not same generation
     {
@@ -299,7 +312,10 @@ void asid_check_switch(rt_aspace_t aspace)
         rt_hw_tlb_invalidate_all_local();
         flush_tlb_mask[cur_cpu] = 0;
     }
-    rt_hw_spin_unlock(&asid_lock.lock);    
+    #error
+#ifdef RT_USING_SMP
+    rt_hw_spin_unlock(&asid_lock);  
+#endif  
 
     return aspace->asid & ASID_MASK;
 }
@@ -312,11 +328,8 @@ void rt_hw_aspace_switch(rt_aspace_t aspace)
         pgtbl = _rt_kmem_v2p(pgtbl);
         uintptr_t tcr;
 
-#ifdef ARCH_HAS_ASID
         rt_uint64_t asid = asid_check_switch(aspace);
-#else
-        rt_uint64_t asid = 0;
-#endif
+
         uint64_t ttbr0_el1 = (uint64_t)pgtbl | (asid << 48);
 
         __asm__ volatile("msr ttbr0_el1, %0" ::"r"(ttbr0_el1) : "memory");
@@ -736,7 +749,7 @@ void rt_hw_mmu_setup_early(unsigned long *tbl0, unsigned long *tbl1,
     int ret;
     unsigned long va = KERNEL_VADDR_START;
     unsigned long count = (size + ARCH_SECTION_MASK) >> ARCH_SECTION_SHIFT;
-    unsigned long normal_attr = MMU_MAP_CUSTOM(MMU_AP_KAUN, NORMAL_MEM);
+    unsigned long normal_attr = MMU_MAP_CUSTOM(MMU_AP_KAUN, NORMAL_MEM, MMU_GLOBAL);
 
     /* clean the first two pages */
     rt_memset((char *)tbl0, 0, ARCH_PAGE_SIZE);
