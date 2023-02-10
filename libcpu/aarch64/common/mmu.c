@@ -312,7 +312,7 @@ rt_uint64_t asid_check_switch(rt_aspace_t aspace)
         rt_hw_tlb_invalidate_all_local();
         flush_tlb_mask[cur_cpu] = 0;
     }
-    #error
+
 #ifdef RT_USING_SMP
     rt_hw_spin_unlock(&asid_lock);  
 #endif  
