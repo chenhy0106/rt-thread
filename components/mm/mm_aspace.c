@@ -31,10 +31,6 @@
 #include <mmu.h>
 #include <tlb.h>
 
-#ifndef RT_USING_SMART
-#define PV_OFFSET 0
-#endif
-
 static void _aspace_unmap(rt_aspace_t aspace, void *addr, rt_size_t length);
 static void *_find_free(rt_aspace_t aspace, void *prefer, rt_size_t req_size,
                         void *limit_start, rt_size_t limit_size,
@@ -208,10 +204,12 @@ static int _do_prefetch(rt_aspace_t aspace, rt_varea_t varea, void *start,
                 LOG_W("%s: MMU mapping failed for va %p to %p of %lx", __func__,
                       vaddr, store + PV_OFFSET, store_sz);
             }
+            else
+            {
+                rt_hw_tlb_invalidate_range(aspace, vaddr, store_sz, ARCH_PAGE_SIZE);
+            }
             vaddr += store_sz;
             off += store_sz >> ARCH_PAGE_SHIFT;
-
-            rt_hw_tlb_invalidate_range(aspace, vaddr, store_sz, ARCH_PAGE_SIZE);
         }
         else
         {
@@ -239,7 +237,7 @@ int _varea_install(rt_aspace_t aspace, rt_varea_t varea, rt_mm_va_hint_t hint)
 
     /* TODO try merge surrounding regions to optimize memory footprint */
 
-    if (alloc_va != ARCH_MAP_FAILED)
+    if (alloc_va != RT_NULL)
     {
         varea->start = alloc_va;
         _aspace_bst_insert(aspace, varea);
@@ -289,9 +287,10 @@ static int _mm_aspace_map(rt_aspace_t aspace, rt_varea_t varea, rt_size_t attr,
 static inline int _not_in_range(void *start, rt_size_t length,
                                 void *limit_start, rt_size_t limit_size)
 {
-    LOG_D("%s: [%p : %p] [%p : %p]", __func__, start, length, limit_start, limit_size);
+    if (start != RT_NULL)
+        LOG_D("%s: [%p : %p] [%p : %p]", __func__, start, length, limit_start, limit_size);
     /* assuming (base + length) will not overflow except (0) */
-    return start != ARCH_MAP_FAILED
+    return start != RT_NULL
                ? ((length > (0ul - (uintptr_t)start)) || start < limit_start ||
                   (length + (rt_size_t)(start - limit_start)) > limit_size)
                : length > limit_size;
@@ -299,7 +298,7 @@ static inline int _not_in_range(void *start, rt_size_t length,
 
 static inline int _not_align(void *start, rt_size_t length, rt_size_t mask)
 {
-    return (start != ARCH_MAP_FAILED) &&
+    return (start != RT_NULL) &&
            (((uintptr_t)start & mask) || (length & mask));
 }
 
@@ -442,7 +441,7 @@ int _mm_aspace_map_phy(rt_aspace_t aspace, rt_varea_t varea,
         if (err == RT_EOK)
             *ret_va = vaddr;
         else
-            *ret_va = ARCH_MAP_FAILED;
+            *ret_va = RT_NULL;
     }
 
     return err;
@@ -488,6 +487,7 @@ int rt_aspace_map_phy_static(rt_aspace_t aspace, rt_varea_t varea,
         varea->start = hint->prefer;
         varea->size = hint->map_size;
         hint->flags |= MMF_MAP_FIXED;
+        LOG_D("%s: start %p size %p phy at %p", __func__, varea->start, varea->size, pa_off << MM_PAGE_SHIFT);
         err = _mm_aspace_map_phy(aspace, varea, hint, attr, pa_off, ret_va);
     }
     else
@@ -514,8 +514,7 @@ void _aspace_unmap(rt_aspace_t aspace, void *addr, rt_size_t length)
         WR_UNLOCK(aspace);
 
         rt_hw_mmu_unmap(aspace, varea->start, varea->size);
-        rt_hw_tlb_invalidate_range(aspace, varea->start, varea->size,
-                                   ARCH_PAGE_SIZE);
+        rt_hw_tlb_invalidate_range(aspace, varea->start, varea->size, ARCH_PAGE_SIZE);
 
         rt_free(varea);
         varea = _aspace_bst_search_overlap(aspace, range);
@@ -555,7 +554,7 @@ static inline void *_align(void *va, rt_ubase_t align_mask)
 static void *_ascending_search(rt_varea_t varea, rt_size_t req_size,
                                rt_ubase_t align_mask, struct _mm_range limit)
 {
-    void *ret = ARCH_MAP_FAILED;
+    void *ret = RT_NULL;
     while (varea && varea->start < limit.end)
     {
         void *candidate = varea->start + varea->size;
@@ -589,7 +588,7 @@ static void *_find_head_and_asc_search(rt_aspace_t aspace, rt_size_t req_size,
                                        rt_ubase_t align_mask,
                                        struct _mm_range limit)
 {
-    void *va = ARCH_MAP_FAILED;
+    void *va = RT_NULL;
 
     rt_varea_t varea = _aspace_bst_search_exceed(aspace, limit.start);
     if (varea)
@@ -641,7 +640,7 @@ static void *_find_free(rt_aspace_t aspace, void *prefer, rt_size_t req_size,
                         mm_flag_t flags)
 {
     rt_varea_t varea = NULL;
-    void *va = ARCH_MAP_FAILED;
+    void *va = RT_NULL;
     struct _mm_range limit = {limit_start, limit_start + limit_size - 1};
 
     rt_ubase_t align_mask = ~0ul;
@@ -650,7 +649,7 @@ static void *_find_free(rt_aspace_t aspace, void *prefer, rt_size_t req_size,
         align_mask = ~((1 << MMF_GET_ALIGN(flags)) - 1);
     }
 
-    if (prefer != ARCH_MAP_FAILED)
+    if (prefer != RT_NULL)
     {
         prefer = _align(prefer, align_mask);
         struct _mm_range range = {prefer, prefer + req_size - 1};
@@ -662,11 +661,12 @@ static void *_find_free(rt_aspace_t aspace, void *prefer, rt_size_t req_size,
         }
         else if (flags & MMF_MAP_FIXED)
         {
+            /* OVERLAP */
         }
         else
         {
             va = _ascending_search(varea, req_size, align_mask, limit);
-            if (va == ARCH_MAP_FAILED)
+            if (va == RT_NULL)
             {
                 limit.end = varea->start - 1;
                 va = _find_head_and_asc_search(aspace, req_size, align_mask,
@@ -743,8 +743,16 @@ int rt_aspace_traversal(rt_aspace_t aspace,
 
 static int _dump(rt_varea_t varea, void *arg)
 {
-    rt_kprintf("%s[%p - %p]\n", varea->mem_obj->get_name(varea), varea->start,
-               varea->start + varea->size);
+    if (varea->mem_obj && varea->mem_obj->get_name)
+    {
+        rt_kprintf("[%p - %p] %s\n", varea->start, varea->start + varea->size,
+                   varea->mem_obj->get_name(varea));
+    }
+    else
+    {
+        rt_kprintf("[%p - %p] phy-map\n", varea->start, varea->start + varea->size);
+        rt_kprintf("\t\\_ paddr = %p\n",  varea->offset << MM_PAGE_SHIFT);
+    }
     return 0;
 }
 

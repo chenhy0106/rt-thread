@@ -18,6 +18,7 @@
 #include <board.h>
 #include <mm_aspace.h>
 #include <string.h>
+#include <stdint.h>
 
 #include <lwp.h>
 #ifdef ARCH_MM_MMU
@@ -77,6 +78,13 @@
 #ifndef GRND_RANDOM
 #define GRND_RANDOM 0x0002
 #endif /*GRND_RANDOM */
+
+#ifndef RT_USING_POSIX_TIMER
+#error "No definition RT_USING_POSIX_TIMER"
+#endif
+#ifndef RT_USING_POSIX_CLOCK
+#error "No definition RT_USING_POSIX_CLOCK"
+#endif
 
 #define SET_ERRNO(no) rt_set_errno(-(no))
 #define GET_ERRNO() ((rt_get_errno() > 0) ? (-rt_get_errno()) : rt_get_errno())
@@ -612,7 +620,7 @@ int sys_fstat(int file, struct stat *buf)
 {
 #ifdef ARCH_MM_MMU
     int ret = -1;
-    struct stat statbuff;
+    struct stat statbuff = {0};
 
     if (!lwp_user_accessable((void *)buf, sizeof(struct stat)))
     {
@@ -1305,12 +1313,22 @@ rt_err_t sys_rt_timer_control(rt_timer_t timer, int cmd, void *arg)
     return rt_timer_control(timer, cmd, arg);
 }
 
+/* MUSL compatible */
+struct ksigevent
+{
+    union sigval sigev_value;
+    int sigev_signo;
+    int sigev_notify;
+    int sigev_tid;
+};
+
 rt_err_t sys_timer_create(clockid_t clockid, struct sigevent *restrict sevp, timer_t *restrict timerid)
 {
     int ret = 0;
 #ifdef ARCH_MM_MMU
     struct sigevent sevp_k;
     timer_t timerid_k;
+    int utimer;
 
     if (sevp == NULL)
     {
@@ -1319,12 +1337,28 @@ rt_err_t sys_timer_create(clockid_t clockid, struct sigevent *restrict sevp, tim
         sevp = &sevp_k;
     }
     else
-        lwp_get_from_user(&sevp_k, (void *)sevp, sizeof sevp_k);
-    lwp_get_from_user(&timerid_k, (void *)timerid, sizeof timerid_k);
+    {
+        /* clear extra bytes if any */
+        if (sizeof(struct ksigevent) < sizeof(struct sigevent))
+            memset(&sevp_k, 0, sizeof(sevp_k));
+
+        /* musl passes `struct ksigevent` to kernel, we shoule only get size of that bytes */
+        lwp_get_from_user(&sevp_k, (void *)sevp, sizeof(struct ksigevent));
+    }
+    lwp_get_from_user(&timerid_k, (void *)timerid, sizeof(timerid_k));
+
+    /* to protect unsafe implementation in current rt-smart toolchain */
+    RT_ASSERT(((struct ksigevent *)sevp)->sigev_tid == *(int *)(&sevp_k.sigev_notify_function));
+
     ret = timer_create(clockid, &sevp_k, &timerid_k);
+
+    /* ID should not extend 32-bits size for libc */
+    RT_ASSERT((rt_ubase_t)timerid_k < UINT32_MAX);
+    utimer = (rt_ubase_t)timerid_k;
+
     if (ret != -RT_ERROR){
-        lwp_put_to_user(sevp, (void *)&sevp_k, sizeof sevp_k);
-        lwp_put_to_user(timerid, (void *)&timerid_k, sizeof timerid_k);
+        lwp_put_to_user(sevp, (void *)&sevp_k, sizeof(struct ksigevent));
+        lwp_put_to_user(timerid, (void *)&utimer, sizeof(utimer));
     }
 #else
     ret = timer_create(clockid, sevp, timerid);
@@ -1347,8 +1381,12 @@ rt_err_t sys_timer_settime(timer_t timerid, int flags,
     struct itimerspec new_value_k;
     struct itimerspec old_value_k;
 
-    lwp_get_from_user(&new_value_k, (void *)new_value, sizeof new_value_k);
-    lwp_get_from_user(&old_value_k, (void *)timerid, sizeof old_value_k);
+    if (!lwp_get_from_user(&new_value_k, (void *)new_value, sizeof(*new_value)) ||
+        (old_value && !lwp_get_from_user(&old_value_k, (void *)old_value, sizeof(*old_value))))
+    {
+        return -EFAULT;
+    }
+
     ret = timer_settime(timerid, flags, &new_value_k, &old_value_k);
     lwp_put_to_user(old_value, (void *)&old_value_k, sizeof old_value_k);
 
@@ -2575,7 +2613,45 @@ int sys_log(const char* log, int size)
 int sys_stat(const char *file, struct stat *buf)
 {
     int ret = 0;
-    ret = stat(file, buf);
+    int err;
+    size_t len;
+    size_t copy_len;
+    char *copy_path;
+    struct stat statbuff = {0};
+
+    if (!lwp_user_accessable((void *)buf, sizeof(struct stat)))
+    {
+        return -EFAULT;
+    }
+
+    len = lwp_user_strlen(file, &err);
+    if (err)
+    {
+        return -EFAULT;
+    }
+
+    copy_path = (char*)rt_malloc(len + 1);
+    if (!copy_path)
+    {
+        return -ENOMEM;
+    }
+
+    copy_len = lwp_get_from_user(copy_path, (void*)file, len);
+    if (copy_len == 0)
+    {
+        rt_free(copy_path);
+        return -EFAULT;
+    }
+    copy_path[copy_len] = '\0';
+
+    ret = stat(copy_path, &statbuff);
+    rt_free(copy_path);
+
+    if (ret == 0)
+    {
+        lwp_put_to_user(buf, &statbuff, sizeof statbuff);
+    }
+
     return (ret < 0 ? GET_ERRNO() : ret);
 }
 
@@ -4157,6 +4233,67 @@ int sys_getrandom(void *buf, size_t buflen, unsigned int flags)
 #endif
     return ret;
 }
+
+ssize_t sys_readlink(char* path, char *buf, size_t bufsz)
+{
+    size_t len, copy_len;
+    int err;
+    int fd = -1;
+    struct dfs_fd *d;
+    char *copy_path;
+
+    len = lwp_user_strlen(path, &err);
+    if (err)
+    {
+        return -EFAULT;
+    }
+
+    if (!lwp_user_accessable(buf, bufsz))
+    {
+        return -EINVAL;
+    }
+
+    copy_path = (char*)rt_malloc(len + 1);
+    if (!copy_path)
+    {
+        return -ENOMEM;
+    }
+
+    copy_len = lwp_get_from_user(copy_path, path, len);
+    copy_path[copy_len] = '\0';
+
+    /* musl __procfdname */
+    err = sscanf(copy_path, "/proc/self/fd/%d", &fd);
+    rt_free(copy_path);
+
+    if (err != 1)
+    {
+        LOG_E("readlink: path not is /proc/self/fd/* , call by musl __procfdname()?");
+        return -EINVAL;
+    }
+
+    d = fd_get(fd);
+    if (!d)
+    {
+        return -EBADF;
+    }
+
+    if (!d->vnode)
+    {
+        return -EBADF;
+    }
+
+    copy_len = strlen(d->vnode->fullpath);
+    if (copy_len > bufsz)
+    {
+        copy_len = bufsz;
+    }
+
+    bufsz = lwp_put_to_user(buf, d->vnode->fullpath, copy_len);
+
+    return bufsz;
+}
+
 int sys_setaffinity(pid_t pid, size_t size, void *set)
 {
     if (!lwp_user_accessable(set, sizeof(cpu_set_t)))
@@ -4672,7 +4809,7 @@ const static void* func_table[] =
     SYSCALL_SIGN(sys_setrlimit),
     SYSCALL_SIGN(sys_setsid),
     SYSCALL_SIGN(sys_getrandom),
-    SYSCALL_SIGN(sys_notimpl),    // SYSCALL_SIGN(sys_readlink)     /* 145 */
+    SYSCALL_SIGN(sys_readlink),    // SYSCALL_SIGN(sys_readlink)     /* 145 */
     SYSCALL_USPACE(SYSCALL_SIGN(sys_mremap)),
     SYSCALL_USPACE(SYSCALL_SIGN(sys_madvise)),
     SYSCALL_SIGN(sys_sched_setparam),
