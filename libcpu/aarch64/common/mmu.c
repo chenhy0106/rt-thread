@@ -289,11 +289,10 @@ void _asid_init(void)
 
 rt_uint64_t asid_check_switch(rt_aspace_t aspace)
 {
-#ifdef RT_USING_SMP
     unsigned long cur_cpu = rt_hw_cpu_id();
+    
+#ifdef RT_USING_SMP
     rt_hw_spin_lock(&asid_lock);
-#else
-    unsigned long cur_cpu = 1;
 #endif
 
     if ((aspace->asid ^ global_asid_generation) >> ASID_BITS) // not same generation
